@@ -341,36 +341,48 @@ func (vm *VirtualMachineDriver) Clone(ctx context.Context, config *CloneConfig) 
 		configSpec.Annotation = config.Annotation
 	}
 
-	if config.Network != "" {
-		net, err := vm.driver.FindNetwork(config.Network)
-		if err != nil {
-			return nil, err
-		}
-		backing, err := net.network.EthernetCardBackingInfo(ctx)
-		if err != nil {
-			return nil, err
-		}
+	devices, err := vm.vm.Device(vm.driver.ctx)
+	if err != nil {
+		return nil, err
+	}
+	virtualNetworkAdapters := devices.SelectByType((*types.VirtualEthernetCard)(nil))
 
-		devices, err := vm.vm.Device(ctx)
-		if err != nil {
-			return nil, err
+	networkNames := splitTrim(config.Network)
+	if len(networkNames) > 0 {
+		if len(networkNames) > len(virtualNetworkAdapters) {
+			return nil, fmt.Errorf("%d network names defined but only %d network adapters exist", len(networkNames), len(virtualNetworkAdapters))
 		}
 
-		adapter, err := findNetworkAdapter(devices)
-		if err != nil {
-			return nil, err
+		macAddresses := splitTrim(config.MacAddress)
+		for i, networkName := range networkNames {
+			// empty network name means don't touch it
+			if networkName == "" {
+				continue
+			}
+
+			net, err := vm.driver.FindNetwork(networkName)
+			if err != nil {
+				return nil, fmt.Errorf("Error finding network: %s", err)
+			}
+			backing, err := net.network.EthernetCardBackingInfo(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("Error finding ethernet card backing info: %s", err)
+			}
+
+			adapter := virtualNetworkAdapters[i].(types.BaseVirtualEthernetCard)
+			card := adapter.GetVirtualEthernetCard()
+			card.Backing = backing
+			if len(macAddresses) > i && macAddresses[i] != "" {
+				card.AddressType = string(types.VirtualEthernetCardMacTypeManual)
+				card.MacAddress = macAddresses[i]
+			}
+
+			config := &types.VirtualDeviceConfigSpec{
+				Device:    adapter.(types.BaseVirtualDevice),
+				Operation: types.VirtualDeviceConfigSpecOperationEdit,
+			}
+			configSpec.DeviceChange = append(configSpec.DeviceChange, config)
 		}
-
-		current := adapter.GetVirtualEthernetCard()
-		current.Backing = backing
-		current.MacAddress = config.MacAddress
-
-		config := &types.VirtualDeviceConfigSpec{
-			Device:    adapter.(types.BaseVirtualDevice),
-			Operation: types.VirtualDeviceConfigSpecOperationEdit,
-		}
-
-		configSpec.DeviceChange = append(configSpec.DeviceChange, config)
 	}
 
 	vAppConfig, err := vm.updateVAppConfig(ctx, config.VAppProperties)
@@ -1153,4 +1165,12 @@ func findNetworkAdapter(l object.VirtualDeviceList) (types.BaseVirtualEthernetCa
 	}
 
 	return c[0].(types.BaseVirtualEthernetCard), nil
+}
+
+func splitTrim(s string) []string {
+	slc := strings.Split(s, ",")
+	for i := range slc {
+		slc[i] = strings.TrimSpace(slc[i])
+	}
+	return slc
 }
